@@ -1,0 +1,31 @@
+# FastAPI stack
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+pydantic==2.9.0
+pydantic-settings==2.5.2
+
+# HTTP and utilities
+requests==2.32.3
+pillow==10.4.0
+python-multipart==0.0.12
+
+# Storage
+google-cloud-storage==2.18.0
+
+# ML/Diffusion models - install from source for latest LTX support
+torch==2.4.1
+torchvision==0.19.1
+accelerate==0.34.0
+safetensors==0.4.5
+transformers==4.45.0
+huggingface_hub==0.25.0
+
+# Install diffusers from git main for latest LTX pipeline support
+git+https://github.com/huggingface/diffusers.git
+
+# Video export
+imageio==2.35.0
+imageio-ffmpeg==0.5.1
+
+# Monitoring
+psutil==6.0.0
