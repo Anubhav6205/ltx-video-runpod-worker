@@ -68,28 +68,67 @@ def init_model() -> None:
         settings.setup_hf_env()
         settings.ensure_directories()
 
+        # DEBUG: Check if volume is mounted and populated
+        logger.info(f"Checking cache directory: {settings.hf_hub_cache}")
+        if settings.hf_hub_cache.exists():
+            try:
+                # List first level of cache
+                contents = list(settings.hf_hub_cache.glob("*"))
+                logger.info(f"Cache directory contents ({len(contents)} items):")
+                for item in contents[:5]:  # Show first 5 items
+                    logger.info(f" - {item.name}")
+            except Exception as e:
+                logger.warning(f"Could not list cache directory: {e}")
+        else:
+            logger.warning(f"Cache directory does not exist: {settings.hf_hub_cache}")
+
         # Import here after env vars are set
+        # Using LTXImageToVideoPipeline for image-to-video generation
+        # See: https://huggingface.co/docs/diffusers/main/api/pipelines/ltx_video
         from diffusers import LTXImageToVideoPipeline
 
         # Download transformer weights explicitly to ensure caching
-        logger.info("Downloading transformer weights...")
-        transformer_path = hf_hub_download(
-            repo_id=settings.ltx_repo_id,
-            filename=settings.ltx_transformer_filename,
-            token=settings.hf_token,
-            cache_dir=str(settings.hf_hub_cache),
-        )
-        logger.info(f"Transformer weights cached at: {transformer_path}")
+        logger.info("Checking for transformer weights...")
+        try:
+            logger.info("Attempting to load transformer weights from local cache...")
+            transformer_path = hf_hub_download(
+                repo_id=settings.ltx_repo_id,
+                filename=settings.ltx_transformer_filename,
+                cache_dir=str(settings.hf_hub_cache),
+                local_files_only=True,
+            )
+            logger.info(f"Found transformer weights in cache: {transformer_path}")
+        except Exception:
+            logger.info("Transformer weights not found locally, downloading...")
+            transformer_path = hf_hub_download(
+                repo_id=settings.ltx_repo_id,
+                filename=settings.ltx_transformer_filename,
+                token=settings.hf_token,
+                cache_dir=str(settings.hf_hub_cache),
+            )
+            logger.info(f"Transformer weights cached at: {transformer_path}")
 
         # Load pipeline from pretrained
+        # Recommended dtype: torch.bfloat16 (supports float16, float32 for VAE/text encoder)
         logger.info("Loading LTX-Video pipeline...")
         torch_dtype = get_torch_dtype(settings.torch_dtype)
 
-        PIPE = LTXImageToVideoPipeline.from_pretrained(
-            settings.ltx_repo_id,
-            torch_dtype=torch_dtype,
-            cache_dir=str(settings.hf_hub_cache),
-        )
+        try:
+            logger.info("Attempting to load pipeline from local cache...")
+            PIPE = LTXImageToVideoPipeline.from_pretrained(
+                settings.ltx_repo_id,
+                torch_dtype=torch_dtype,
+                cache_dir=str(settings.hf_hub_cache),
+                local_files_only=True,
+            )
+            logger.info("Pipeline loaded from local cache")
+        except Exception as e:
+            logger.info(f"Could not load pipeline locally ({str(e)}), attempting download...")
+            PIPE = LTXImageToVideoPipeline.from_pretrained(
+                settings.ltx_repo_id,
+                torch_dtype=torch_dtype,
+                cache_dir=str(settings.hf_hub_cache),
+            )
 
         # Move to CUDA
         if not torch.cuda.is_available():

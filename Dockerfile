@@ -28,9 +28,17 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy requirements first for better caching
 COPY requirements.txt /app/requirements.txt
 
-# Install Python dependencies
+# Install PyTorch with CUDA 12.1 support for RTX 4090
+# Installed separately to ensure correct CUDA version
+# Using 2.5.1 (latest available for CUDA 12.1)
+RUN python3 -m pip install --no-cache-dir \
+    torch==2.5.1 \
+    torchvision==0.20.1 \
+    --index-url https://download.pytorch.org/whl/cu121
+
+# Install remaining Python dependencies
 # This layer is cached unless requirements.txt changes
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app/ /app/app/
@@ -41,7 +49,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # Create directories for models and outputs
 # These should be mounted as volumes for persistence
-RUN mkdir -p /models/hf_home /models/hf_hub /models/hf_transformers /workspace/outputs
+RUN mkdir -p /workspace/models/hf_home /workspace/models/hf_hub /workspace/models/hf_transformers /workspace/outputs
 
 # Expose HTTP port (RunPod proxy will map this)
 EXPOSE 8000
@@ -51,9 +59,9 @@ ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
 ENV WORKDIR=/workspace
 ENV OUTPUT_DIR=/workspace/outputs
-ENV HF_HOME=/models/hf_home
-ENV HF_HUB_CACHE=/models/hf_hub
-ENV TRANSFORMERS_CACHE=/models/hf_transformers
+ENV HF_HOME=/workspace/models/hf_home
+ENV HF_HUB_CACHE=/workspace/models/hf_hub
+ENV TRANSFORMERS_CACHE=/workspace/models/hf_transformers
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \

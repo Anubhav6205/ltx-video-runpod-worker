@@ -71,6 +71,8 @@ def generate_clip(request: GenerateClipRequest) -> Tuple[str, Path, GenerationMe
             context = torch.cuda.amp.autocast(enabled=(settings.torch_dtype == "float16"))
 
             with context:
+                # Using recommended parameters from LTX-Video 0.9.1+ documentation
+                # See: https://huggingface.co/docs/diffusers/main/api/pipelines/ltx_video
                 result = pipeline(
                     prompt=request.video_prompt,
                     negative_prompt=request.negative_prompt,
@@ -80,6 +82,9 @@ def generate_clip(request: GenerateClipRequest) -> Tuple[str, Path, GenerationMe
                     guidance_scale=request.guidance_scale,
                     height=request.height,
                     width=request.width,
+                    frame_rate=request.fps,  # Added for temporal coordinates normalization
+                    decode_timestep=0.05,     # Recommended for timestep-aware VAE variants (0.9.1+)
+                    decode_noise_scale=0.025, # Recommended noise interpolation at decode time
                     generator=generator,
                 )
 

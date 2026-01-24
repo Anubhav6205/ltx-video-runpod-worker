@@ -6,9 +6,9 @@ echo "LTX-Video Worker - Entrypoint"
 echo "=================================================="
 
 # Export HuggingFace cache environment variables
-export HF_HOME=${HF_HOME:-/models/hf_home}
-export HF_HUB_CACHE=${HF_HUB_CACHE:-/models/hf_hub}
-export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-/models/hf_transformers}
+export HF_HOME=${HF_HOME:-/workspace/models/hf_home}
+export HF_HUB_CACHE=${HF_HUB_CACHE:-/workspace/models/hf_hub}
+export TRANSFORMERS_CACHE=${TRANSFORMERS_CACHE:-/workspace/models/hf_transformers}
 export HF_HUB_ENABLE_HF_TRANSFER=${HF_HUB_ENABLE_HF_TRANSFER:-1}
 
 echo "HF_HOME: $HF_HOME"
@@ -31,6 +31,27 @@ else
     echo "WARNING: nvidia-smi not found - GPU may not be available!"
 fi
 
+# Verify PyTorch CUDA availability
+echo ""
+echo "Verifying PyTorch CUDA setup..."
+python3 -c "
+import torch
+print(f'PyTorch version: {torch.__version__}')
+print(f'CUDA available: {torch.cuda.is_available()}')
+if torch.cuda.is_available():
+    print(f'CUDA version: {torch.version.cuda}')
+    print(f'GPU device: {torch.cuda.get_device_name(0)}')
+    print(f'GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB')
+else:
+    print('ERROR: CUDA is not available! LTX-Video requires GPU.')
+    exit(1)
+"
+
+if [ $? -ne 0 ]; then
+    echo "FATAL: PyTorch CUDA verification failed!"
+    exit 1
+fi
+
 echo ""
 echo "Starting model initialization..."
 echo "This may take several minutes on first run (downloading weights)"
@@ -51,7 +72,7 @@ echo "Port: ${PORT:-8000}"
 echo "=================================================="
 
 # Start uvicorn server
-exec uvicorn app.main:app \
+exec python3 -m uvicorn app.main:app \
     --host 0.0.0.0 \
     --port "${PORT:-8000}" \
     --log-level "${LOG_LEVEL:-info}" \

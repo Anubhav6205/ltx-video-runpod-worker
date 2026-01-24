@@ -37,9 +37,9 @@ class Settings(BaseSettings):
 
     # ===== Hugging Face Configuration =====
     hf_token: Optional[str] = Field(default=None, description="HuggingFace API token (optional for public models)")
-    hf_home: Path = Field(default=Path("/models/hf_home"), description="HuggingFace home directory")
-    hf_hub_cache: Path = Field(default=Path("/models/hf_hub"), description="HuggingFace Hub cache directory")
-    transformers_cache: Path = Field(default=Path("/models/hf_transformers"), description="Transformers cache directory")
+    hf_home: Path = Field(default=Path("/workspace/models/hf_home"), description="HuggingFace home directory")
+    hf_hub_cache: Path = Field(default=Path("/workspace/models/hf_hub"), description="HuggingFace Hub cache directory")
+    transformers_cache: Path = Field(default=Path("/workspace/models/hf_transformers"), description="Transformers cache directory")
     hf_hub_enable_hf_transfer: str = Field(default="1", description="Enable faster HF transfers")
 
     # ===== LTX-Video Model Configuration =====
@@ -92,6 +92,22 @@ class Settings(BaseSettings):
     min_steps: int = Field(default=1, description="Minimum allowed steps")
     max_duration_s: float = Field(default=10.0, description="Maximum duration in seconds")
     min_duration_s: float = Field(default=1.0, description="Minimum duration in seconds")
+
+    def model_post_init(self, __context):
+        """
+        Post-initialization hook to auto-discover GCS credentials
+        """
+        if not self.gcs_service_account_key:
+            # Check common locations for the key file
+            potential_paths = [
+                self.workdir / "gcs-service-account.json",
+                Path("gcs-service-account.json"),
+                Path("/app/gcs-service-account.json"),
+            ]
+            for path in potential_paths:
+                if path.exists():
+                    self.gcs_service_account_key = str(path.absolute())
+                    break
 
     def setup_hf_env(self):
         """
