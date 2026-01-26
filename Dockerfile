@@ -19,11 +19,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep pip tooling modern (but avoid pulling compilers/toolchains)
-RUN python -m pip install -U pip setuptools wheel
+RUN python -m pip install --break-system-packages -U pip setuptools wheel
 
 # Install Python deps (torch is already in the base image)
 COPY requirements.txt /app/requirements.txt
-RUN python -m pip install -r /app/requirements.txt
+RUN python -m pip install --break-system-packages -r /app/requirements.txt
 
 # Copy app
 COPY app/ /app/app/
