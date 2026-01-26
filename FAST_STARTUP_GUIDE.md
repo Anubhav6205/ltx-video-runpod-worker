@@ -140,37 +140,17 @@ Startup Time: 30-60 seconds ⚡
 
 ---
 
-## 📊 Option 3: GCS Pre-cached Weights (Good for Multi-Region)
-
-### How It Works
-Upload weights to GCS once, download from GCS on pod startup (faster than HuggingFace).
-
-**Result:**
-- ✅ Pod startup: **60-120 seconds** (3x faster than HF)
-- ✅ Works across regions
-- ✅ Cheaper storage: **$0.50/month**
-- ✅ No volume management
-
-**Trade-offs:**
-- ❌ Slower than baked image or volume (60-120 sec vs 30-60 sec)
-- ❌ GCS egress costs: **~$0.25 per pod startup**
-- ❌ Requires GCS setup
-
-See [GCS_WEIGHT_CACHING.md](GCS_WEIGHT_CACHING.md) for details.
-
----
-
 ## 🏆 Comparison: Which to Choose?
 
-| Criteria | Baked Image | Network Volume | GCS Cache | HF Only |
-|----------|-------------|----------------|-----------|---------|
-| **Startup Time** | 30-60 sec | 30-60 sec | 60-120 sec | 15-20 min |
-| **First Run** | 30-60 sec | 20 min | 60-120 sec | 15-20 min |
-| **Setup Complexity** | Medium | Low | High | None |
-| **Docker Image Size** | 37 GB | 12 GB | 12 GB | 12 GB |
-| **Monthly Cost** | $15-20 | $3.50 | $0.50 + egress | Free |
-| **Best For** | Spot instances | Production | Multi-region | Testing |
-| **Model Updates** | Rebuild image | Update volume | Update GCS | Automatic |
+| Criteria | Baked Image | Network Volume | HF Only |
+|----------|-------------|----------------|---------|
+| **Startup Time** | 30-60 sec | 30-60 sec | 15-20 min |
+| **First Run** | 30-60 sec | 20 min | 15-20 min |
+| **Setup Complexity** | Medium | Low | None |
+| **Docker Image Size** | 37 GB | 12 GB | 12 GB |
+| **Monthly Cost** | $15-20 | $3.50 | Free |
+| **Best For** | Spot instances | Production | Testing |
+| **Model Updates** | Rebuild image | Update volume | Automatic |
 
 ---
 
@@ -190,10 +170,7 @@ See [GCS_WEIGHT_CACHING.md](GCS_WEIGHT_CACHING.md) for details.
 - Pay once for registry storage
 
 ### For Multi-Region Deployment
-**Use GCS Cache** (Option 3):
-- Works across all regions
-- Lowest storage cost
-- Centralized weight management
+Use **one Network Volume per region** (or the baked image) to keep startup fast without re-downloading weights.
 
 ---
 

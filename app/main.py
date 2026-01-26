@@ -3,10 +3,21 @@ FastAPI application entry point
 Exposes HTTP endpoints for health checks and video generation
 """
 
+# 1. Load configuration from volume (if present) BEFORE importing settings
+# This allows credentials to be injected via /workspace/.env
+try:
+    from app.config_loader import load_volume_config
+    load_volume_config()
+except ImportError:
+    pass
+
 import asyncio
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
+import tempfile
+import os
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -19,11 +30,13 @@ from app.models import (
     HealthResponse,
     ReadyResponse,
     ErrorResponse,
+    TestR2Response,
+    TestR2Request,
 )
 from app.logging_config import setup_logging, get_logger, request_id_var, job_id_var
 from app.bootstrap import init_model, is_ready, warmup_model
 from app.infer import generate_clip
-from app.storage import upload_video
+from app.storage import upload_video, upload_file_and_get_url_r2
 
 # Initialize logging
 setup_logging(settings.log_level)
@@ -31,6 +44,115 @@ logger = get_logger(__name__)
 
 # Concurrency semaphore (prevents VRAM OOM on single GPU)
 generation_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _create_test_mp4(path: Path) -> None:
+    try:
+        import numpy as np
+        import imageio.v2 as imageio
+
+        frame = np.zeros((16, 16, 3), dtype=np.uint8)
+        writer = imageio.get_writer(
+            str(path),
+            fps=1,
+            codec="libx264",
+            format="FFMPEG",
+            macro_block_size=None,
+        )
+        writer.append_data(frame)
+        writer.close()
+    except Exception:
+        # Fallback: bytes-only file (still validates upload path + credentials)
+        path.write_bytes(b"R2 upload test (not a real mp4)\n")
+
+
+def _path_is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_user_mp4_path(mp4_path: str) -> Path:
+    path = Path(mp4_path)
+    if not path.is_absolute():
+        path = settings.workdir / path
+
+    if not path.exists() or not path.is_file():
+        raise ValueError(f"MP4 file not found: {path}")
+
+    if path.suffix.lower() != ".mp4":
+        raise ValueError(f"File must be a .mp4: {path}")
+
+    allowed_roots = [settings.output_dir, settings.workdir]
+    extra = (settings.test_r2_allowed_roots or "").strip()
+    if extra:
+        for part in extra.split(os.pathsep):
+            part = part.strip()
+            if not part:
+                continue
+            root = Path(part)
+            if not root.is_absolute():
+                root = settings.workdir / root
+            allowed_roots.append(root)
+
+    if not settings.test_r2_allow_any_path:
+        if not any(_path_is_within(path, root) for root in allowed_roots):
+            allowed_hint = f"{settings.output_dir} ; {settings.workdir}"
+            if extra:
+                allowed_hint = f"{allowed_hint} ; {extra}"
+            raise ValueError(
+                "mp4_path must be within OUTPUT_DIR/WORKDIR "
+                f"(allowed roots: {allowed_hint}). "
+                "To allow additional roots set TEST_R2_ALLOWED_ROOTS, "
+                "or set TEST_R2_ALLOW_ANY_PATH=true (unsafe). "
+                f"Got: {path}"
+            )
+
+    max_size_bytes = 1024 * 1024 * 1024  # 1 GiB safety cap for this endpoint
+    size = path.stat().st_size
+    if size > max_size_bytes:
+        raise ValueError(f"MP4 file too large for test endpoint ({size} bytes)")
+
+    return path
+
+
+def _test_r2_upload_sync(request: Optional[TestR2Request]) -> tuple[str, str, str]:
+    if not settings.r2_bucket:
+        raise ValueError("R2_BUCKET is required to test R2 upload")
+
+    job_id = request.job_id if request and request.job_id else str(uuid.uuid4())
+    prefix = (settings.storage_key_prefix or "clips").strip().strip("/")
+    key = f"{prefix}/{job_id}.mp4" if prefix else f"{job_id}.mp4"
+
+    created_temp = False
+    tmp_path: Optional[Path] = None
+    if request and request.mp4_path:
+        local_path = _resolve_user_mp4_path(request.mp4_path)
+    else:
+        settings.output_dir.mkdir(parents=True, exist_ok=True)
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="r2-test-",
+            suffix=".mp4",
+            dir=str(settings.output_dir),
+            delete=False,
+        )
+        tmp_path = Path(tmp.name)
+        tmp.close()
+        _create_test_mp4(tmp_path)
+        local_path = tmp_path
+        created_temp = True
+
+    try:
+        url = upload_file_and_get_url_r2(local_path, key)
+        return job_id, key, url
+    finally:
+        if created_temp and tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                logger.warning(f"Failed to delete temp test file: {tmp_path}")
 
 
 @asynccontextmanager
@@ -142,6 +264,28 @@ async def ready():
     )
 
 
+@app.post("/test_r2", response_model=TestR2Response)
+async def test_r2(request: Optional[TestR2Request] = None):
+    """
+    Upload a tiny test MP4 to Cloudflare R2 using the same env configuration
+    as the generation flow, and return the resulting URL.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        job_id, key, url = await loop.run_in_executor(None, _test_r2_upload_sync, request)
+        return TestR2Response(ok=True, job_id=job_id, bucket=settings.r2_bucket, key=key, url=url)
+
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    except Exception as e:
+        logger.error(f"R2 test upload failed: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"R2 test upload failed: {str(e)}",
+        )
+
+
 @app.post("/generate_clip", response_model=GenerateClipResponse)
 async def generate_clip_endpoint(request: GenerateClipRequest):
     """
@@ -241,6 +385,7 @@ async def root():
             "health": "/health",
             "ready": "/ready",
             "generate": "/generate_clip",
+            "test_r2": "/test_r2",
         },
     }
 

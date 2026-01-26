@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from pydantic import Field
+from pydantic import Field, AliasChoices
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,10 +45,11 @@ class Settings(BaseSettings):
     # ===== LTX-Video Model Configuration =====
     ltx_repo_id: str = Field(default="Lightricks/LTX-Video", description="HuggingFace repository ID")
     ltx_transformer_filename: str = Field(
-        default="ltxv-2b-0.9.8-distilled.safetensors",
+        default="ltxv-13b-0.9.8-distilled-fp8.safetensors",
         description="Transformer weights filename"
     )
     torch_dtype: str = Field(default="bfloat16", description="Torch dtype (bfloat16, float16, float32)")
+    use_fp8: bool = Field(default=True, description="Enable FP8 (float8_e4m3fn) loading for transformer")
 
     # ===== Default Generation Parameters =====
     default_width: int = Field(default=704, description="Default video width")
@@ -61,7 +62,38 @@ class Settings(BaseSettings):
         description="Default negative prompt"
     )
 
-    # ===== Storage Configuration (Google Cloud Storage) =====
+    # ===== Storage Configuration =====
+    storage_backend: str = Field(
+        default="r2",
+        description="Storage backend for uploads: r2 or gcs"
+    )
+    storage_key_prefix: str = Field(
+        default="clips",
+        description="Prefix/folder for uploaded videos within the bucket"
+    )
+
+    # --- Cloudflare R2 (S3-compatible) ---
+    r2_bucket: str = Field(default="", description="Cloudflare R2 bucket name")
+    r2_account_id: Optional[str] = Field(default=None, description="Cloudflare account ID (used to build endpoint URL)")
+    r2_endpoint_url: Optional[str] = Field(
+        default=None,
+        description="R2 S3 endpoint URL (overrides account-id based URL)"
+    )
+    r2_access_key_id: Optional[str] = Field(default=None, description="R2 access key ID")
+    r2_secret_access_key: Optional[str] = Field(default=None, description="R2 secret access key")
+    r2_region: str = Field(default="auto", description="S3 region (use 'auto' for R2)")
+    r2_public_base: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("R2_PUBLIC_BASE", "R2_PUBLIC_BASE_URL"),
+        description="Public base URL for uploaded files (supports {bucket} placeholder)"
+    )
+    r2_signed_url_ttl_s: int = Field(
+        default=3600,
+        validation_alias=AliasChoices("R2_SIGNED_URL_TTL_S", "R2_PRESIGN_TTL_S"),
+        description="Signed URL TTL in seconds"
+    )
+
+    # --- Google Cloud Storage (legacy/optional) ---
     gcs_bucket: str = Field(default="", description="GCS bucket name")
     gcs_project_id: Optional[str] = Field(default=None, description="GCS project ID")
     gcs_service_account_key: Optional[str] = Field(
@@ -82,6 +114,16 @@ class Settings(BaseSettings):
     warmup_on_start: bool = Field(default=False, description="Run warmup generation on startup")
     warmup_prompt: str = Field(default="A person walking in a park", description="Warmup prompt")
     warmup_image_url: Optional[str] = Field(default=None, description="Warmup image URL (optional)")
+
+    # ===== Diagnostics / Test Endpoints =====
+    test_r2_allow_any_path: bool = Field(
+        default=False,
+        description="Allow /test_r2 to upload any local mp4_path (unsafe for public deployments)"
+    )
+    test_r2_allowed_roots: str = Field(
+        default="",
+        description=f"Additional allowed roots for /test_r2 mp4_path (separated by '{os.pathsep}')"
+    )
 
     # ===== Safety Limits (prevent abuse) =====
     max_width: int = Field(default=1280, description="Maximum allowed width")

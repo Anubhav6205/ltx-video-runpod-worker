@@ -1,12 +1,13 @@
 # LTX-Video RunPod Worker
 
-A production-ready FastAPI service for generating videos from images using **LTX-Video 2B distilled model**. Designed for deployment on RunPod GPU pods (RTX 4090) with Google Cloud Storage (GCS) integration.
+A production-ready FastAPI service for generating videos from images using **LTX-Video 2B distilled model**. Designed for deployment on RunPod GPU pods (RTX 4090) with Cloudflare R2 (default) or Google Cloud Storage (GCS) uploads.
 
 ## Features
 
 - **Image-to-Video Generation** using LTX-Video 2B distilled model
 - **REST API** with FastAPI (OpenAPI docs at `/docs`)
-- **GCS Integration** for video storage and public URL generation
+- **Cloudflare R2 Uploads (default)** for video storage and URL generation
+- **Optional GCS Uploads** for legacy setups
 - **Concurrency Control** to prevent VRAM OOM on single GPU
 - **Structured Logging** with request/job ID tracking
 - **Docker Support** with NVIDIA GPU runtime
@@ -21,6 +22,7 @@ A production-ready FastAPI service for generating videos from images using **LTX
 - `GET /health` - Health check (always returns 200 if server is running)
 - `GET /ready` - Readiness check (returns 200 only when model is loaded)
 - `POST /generate_clip` - Generate video from image + prompt
+- `POST /test_r2` - Upload an MP4 to R2 (verifies R2 credentials + URL generation)
 - `GET /` - Service info and endpoint list
 
 ### Example Request
@@ -45,7 +47,7 @@ curl -X POST http://localhost:8000/generate_clip \
 ```json
 {
   "job_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-  "clip_url": "https://storage.googleapis.com/my-bucket/clips/f47ac10b-58cc-4372-a567-0e02b2c3d479.mp4",
+  "clip_url": "https://<your-public-base>/clips/f47ac10b-58cc-4372-a567-0e02b2c3d479.mp4",
   "meta": {
     "fps": 24,
     "num_frames": 121,
@@ -68,7 +70,7 @@ curl -X POST http://localhost:8000/generate_clip \
 - NVIDIA GPU with CUDA 12.1+
 - 16GB+ VRAM (24GB recommended)
 - ffmpeg installed
-- Google Cloud Storage bucket and credentials
+- Cloudflare R2 bucket and credentials (default) OR Google Cloud Storage bucket and credentials (optional)
 
 ### Setup
 
@@ -92,16 +94,16 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. **Configure Google Cloud credentials**
+4. **Configure Cloudflare R2 (default)**
 
-Create a service account in Google Cloud Console with Storage Object Admin permissions, download the JSON key file, and set up authentication:
+Create an R2 bucket and an R2 API token (access key + secret) in Cloudflare, then set these in `.env`:
 
 ```bash
-# Option 1: Set environment variable (recommended for local dev)
-export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your-service-account-key.json"
-
-# Option 2: Specify in .env file
-# GCS_SERVICE_ACCOUNT_KEY=/path/to/your-service-account-key.json
+STORAGE_BACKEND=r2
+R2_BUCKET=your-bucket-name
+R2_ACCOUNT_ID=your-cloudflare-account-id
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
 ```
 
 5. **Configure environment**
@@ -109,9 +111,7 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/your-service-account-key.json"
 ```bash
 cp .env.example .env
 # Edit .env and fill in your configuration:
-# - GCS_BUCKET=your-bucket-name
-# - GCS_PROJECT_ID=your-project-id
-# - GCS_SERVICE_ACCOUNT_KEY=/path/to/key.json (if not using GOOGLE_APPLICATION_CREDENTIALS)
+# - R2_* variables (default) OR set STORAGE_BACKEND=gcs and configure GCS_*
 # - Optional: HF_TOKEN for private models
 # - Optional: Adjust paths, timeouts, model settings
 ```
@@ -144,6 +144,17 @@ curl -X POST http://localhost:8000/generate_clip \
   -d '{"image_url": "https://example.com/test.jpg", "video_prompt": "A person walking"}'
 ```
 
+### Test R2 Upload
+
+```bash
+# Upload an existing MP4 from the worker filesystem (must be under WORKDIR/OUTPUT_DIR by default)
+curl -X POST http://localhost:8000/test_r2 \
+  -H "Content-Type: application/json" \
+  -d '{"mp4_path": "/workspace/outputs/example.mp4"}'
+```
+
+If your MP4 is outside `WORKDIR`/`OUTPUT_DIR`, set `TEST_R2_ALLOWED_ROOTS` (or `TEST_R2_ALLOW_ANY_PATH=true`, unsafe) in your `.env`.
+
 ## Docker Deployment
 
 ### Build the Image
@@ -165,8 +176,6 @@ docker run --gpus all \
   -p 8000:8000 \
   -v $(pwd)/models:/models \
   -v $(pwd)/outputs:/workspace/outputs \
-  -v /path/to/your-service-account-key.json:/app/gcs-key.json \
-  -e GOOGLE_APPLICATION_CREDENTIALS=/app/gcs-key.json \
   your-registry/ltx-worker:0.1
 ```
 
@@ -185,13 +194,8 @@ docker push your-registry/ltx-worker:0.1
 ### Prerequisites
 
 1. **Push your Docker image** to a public registry (Docker Hub, GHCR, etc.)
-2. **Configure GCS storage** for video uploads
-3. **Prepare service account key** as a base64 string (for environment variable)
-
-```bash
-# Convert service account key to base64
-base64 -w 0 your-service-account-key.json > key-base64.txt
-```
+2. **Configure Cloudflare R2** for video uploads (default) by setting `R2_*` environment variables
+3. *(Optional)* Configure GCS by setting `STORAGE_BACKEND=gcs` and `GCS_*` variables
 
 ### Step-by-Step Deployment
 
@@ -209,15 +213,16 @@ base64 -w 0 your-service-account-key.json > key-base64.txt
    - **Volume**: Mount a persistent volume at `/models` (50GB+) to cache model weights between pod restarts
    - **Expose HTTP Ports**: `8000`
    - **Environment Variables**: Add all variables from your `.env`:
-     ```
-     GCS_BUCKET=your-bucket-name
-     GCS_PROJECT_ID=your-project-id
-     GCS_SERVICE_ACCOUNT_KEY=/tmp/gcs-key.json
-     HF_TOKEN=your-hf-token (optional)
-     WARMUP_ON_START=true (optional)
-     ```
-   - **Secret Files**: Upload your service account JSON key file to `/tmp/gcs-key.json`
-     - Or use base64 encoded key in environment variable and decode in entrypoint
+      ```
+      STORAGE_BACKEND=r2
+      R2_BUCKET=your-bucket-name
+      R2_ACCOUNT_ID=your-cloudflare-account-id
+      R2_ACCESS_KEY_ID=...
+      R2_SECRET_ACCESS_KEY=...
+      HF_TOKEN=your-hf-token (optional)
+      WARMUP_ON_START=true (optional)
+      ```
+   - *(Optional)* If using GCS instead: set `STORAGE_BACKEND=gcs` and configure `GCS_*` variables
 
 4. **Deploy and Wait**
    - Click "Deploy On-Demand" or "Deploy Spot"
@@ -239,7 +244,7 @@ base64 -w 0 your-service-account-key.json > key-base64.txt
 - **Spot Instances**: Use spot instances for cost savings (can be interrupted but much cheaper)
 - **Auto-scaling**: For production, consider RunPod Serverless for automatic scaling
 - **Monitoring**: Check pod logs regularly during first few runs to ensure model loads correctly
-- **GCS Credentials**: Store service account key securely - consider using RunPod secrets or environment variables
+- **R2 Credentials**: Store access key/secret securely (RunPod secrets recommended)
 
 ## Configuration Reference
 
@@ -257,11 +262,17 @@ See [.env.example](.env.example) for all available configuration options.
 | `TORCH_DTYPE` | `bfloat16` | Precision (bfloat16/float16/float32) |
 | `DEFAULT_STEPS` | `8` | Inference steps (4-8 optimal for distilled) |
 | `DEFAULT_GUIDANCE_SCALE` | `1.0` | Guidance scale (1.0 for distilled) |
-| `GCS_BUCKET` | *required* | GCS bucket name |
-| `GCS_PROJECT_ID` | *optional* | GCS project ID |
-| `GCS_SERVICE_ACCOUNT_KEY` | *optional* | Path to service account JSON key |
-| `GCS_PUBLIC_BASE` | *optional* | Public CDN URL (if bucket is public) |
-| `GCS_MAKE_PUBLIC` | `false` | Auto-make uploaded blobs public |
+| `STORAGE_BACKEND` | `r2` | Storage backend (`r2` or `gcs`) |
+| `STORAGE_KEY_PREFIX` | `clips` | Object key prefix/folder |
+| `R2_BUCKET` | *required* | Cloudflare R2 bucket name |
+| `R2_ACCOUNT_ID` | *required* | Cloudflare account ID (or set `R2_ENDPOINT_URL`) |
+| `R2_ENDPOINT_URL` | *optional* | R2 endpoint URL override |
+| `R2_ACCESS_KEY_ID` | *required* | R2 access key ID |
+| `R2_SECRET_ACCESS_KEY` | *required* | R2 secret access key |
+| `R2_REGION` | `auto` | S3 region (use `auto` for R2) |
+| `R2_PUBLIC_BASE_URL` | *optional* | Public base URL (supports `{bucket}`) |
+| `R2_PRESIGN_TTL_S` | `3600` | Signed URL TTL (seconds) |
+| `GCS_BUCKET` | *optional* | GCS bucket name (when using `STORAGE_BACKEND=gcs`) |
 | `HF_TOKEN` | *optional* | HuggingFace token (for private models) |
 
 ### Default Generation Parameters
@@ -286,82 +297,44 @@ Built-in safety limits prevent abuse:
 
 ## Storage Configuration
 
-### Google Cloud Storage Setup
+### Cloudflare R2 Setup (Default)
 
-1. **Create a GCS bucket**
-
-```bash
-gsutil mb -p your-project-id -c STANDARD -l us-central1 gs://your-bucket-name
-```
-
-2. **Create a service account**
+1. Create an R2 bucket in the Cloudflare dashboard.
+2. Create an R2 API token (S3 credentials) with read/write access to the bucket.
+3. Configure `.env`:
 
 ```bash
-gcloud iam service-accounts create ltx-worker \
-    --display-name="LTX Video Worker"
-```
-
-3. **Grant permissions**
-
-```bash
-gsutil iam ch serviceAccount:ltx-worker@your-project-id.iam.gserviceaccount.com:objectAdmin \
-    gs://your-bucket-name
-```
-
-4. **Create and download key**
-
-```bash
-gcloud iam service-accounts keys create ~/ltx-worker-key.json \
-    --iam-account=ltx-worker@your-project-id.iam.gserviceaccount.com
-```
-
-5. **Configure .env**
-
-```bash
-GCS_BUCKET=your-bucket-name
-GCS_PROJECT_ID=your-project-id
-GCS_SERVICE_ACCOUNT_KEY=/path/to/ltx-worker-key.json
+STORAGE_BACKEND=r2
+R2_BUCKET=your-bucket-name
+R2_ACCOUNT_ID=your-cloudflare-account-id
+R2_ACCESS_KEY_ID=...
+R2_SECRET_ACCESS_KEY=...
 ```
 
 ### URL Generation Options
 
-The worker supports three methods for generating video URLs:
+The worker supports two methods for generating video URLs:
 
-#### 1. Public Base URL (CDN)
-
-```bash
-# .env configuration for CDN
-GCS_BUCKET=your-bucket-name
-GCS_PUBLIC_BASE=https://cdn.example.com
-```
-
-Returns: `https://cdn.example.com/clips/{job_id}.mp4`
-
-**Use when**: You have a CDN or Cloud Load Balancer in front of your GCS bucket.
-
-#### 2. Make Blobs Public
+#### 1. Public Base URL (Recommended)
 
 ```bash
-# .env configuration for public bucket
-GCS_BUCKET=your-bucket-name
-GCS_MAKE_PUBLIC=true
+# .env configuration for public URL
+R2_PUBLIC_BASE_URL=https://<your-public-base>
 ```
 
-Returns: `https://storage.googleapis.com/your-bucket-name/clips/{job_id}.mp4`
+Returns: `https://<your-public-base>/clips/{job_id}.mp4`
 
-**Use when**: Your bucket is configured for public access. Blobs are automatically made public on upload.
-
-#### 3. Signed URLs (Default)
+#### 2. Signed URLs (Default when `R2_PUBLIC_BASE_URL` is empty)
 
 ```bash
-# .env configuration for private bucket
-GCS_BUCKET=your-bucket-name
-GCS_SIGNED_URL_TTL_S=3600
+R2_PRESIGN_TTL_S=3600
 ```
 
-Returns: `https://storage.googleapis.com/your-bucket-name/clips/{job_id}.mp4?X-Goog-Signature=...`
+Returns: a presigned `GET` URL (expires after TTL seconds).
 
-**Use when**: You want temporary access to private files. URLs expire after TTL seconds (default 1 hour).
+### Google Cloud Storage Setup (Optional/Legacy)
+
+If you need to keep using GCS, set `STORAGE_BACKEND=gcs` and configure `GCS_BUCKET` (and optionally `GCS_SERVICE_ACCOUNT_KEY`, `GCS_PUBLIC_BASE`, etc.).
 
 ## Troubleshooting
 
@@ -398,17 +371,15 @@ Returns: `https://storage.googleapis.com/your-bucket-name/clips/{job_id}.mp4?X-G
 - Check GPU utilization: `nvidia-smi dmon`
 - Ensure CUDA is being used (check logs)
 
-### GCS Upload Failures
+### R2 Upload Failures
 
 **Symptom**: Generation succeeds but upload fails
 
 **Solutions**:
-- Verify GCS credentials are correctly configured
-- Check service account has Storage Object Admin role
-- Verify bucket exists: `gsutil ls gs://your-bucket-name`
-- Test bucket write permissions: `gsutil cp test.txt gs://your-bucket-name/`
-- Check GOOGLE_APPLICATION_CREDENTIALS environment variable
-- Ensure network connectivity to storage.googleapis.com
+- Verify `R2_BUCKET`, `R2_ACCOUNT_ID` (or `R2_ENDPOINT_URL`), `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY`
+- Ensure the R2 API token has permission to read/write the bucket
+- If using `R2_PUBLIC_BASE_URL`, verify your public domain/CDN is correctly configured
+- If using `STORAGE_BACKEND=gcs`, follow the GCS setup and credential troubleshooting steps
 
 ### 429 Too Many Requests
 

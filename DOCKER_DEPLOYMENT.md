@@ -53,9 +53,11 @@ docker push your-username/ltx-video-worker:latest
      ```
      PORT=8000
      LOG_LEVEL=INFO
-     GCS_BUCKET=your-bucket-name
-     # Optional: Auto-detected if present at /workspace/gcs-service-account.json
-     GCS_SERVICE_ACCOUNT_KEY=/workspace/gcs-service-account.json
+     STORAGE_BACKEND=r2
+     R2_BUCKET=your-bucket-name
+     R2_ACCOUNT_ID=your-cloudflare-account-id
+     R2_ACCESS_KEY_ID=...
+     R2_SECRET_ACCESS_KEY=...
      PRELOAD_MODEL=true
      ```
 
@@ -97,7 +99,7 @@ docker push your-username/ltx-video-worker:latest
   │   ├── hf_hub/
   │   └── hf_transformers/
   ├── outputs/         # Generated videos
-  └── gcs-service-account.json # (Optional) GCS credentials
+  └── gcs-service-account.json # (Optional, only if using GCS)
 ```
 
 ## Environment Variables
@@ -108,7 +110,17 @@ docker push your-username/ltx-video-worker:latest
 | `LOG_LEVEL` | `INFO` | Logging level (DEBUG, INFO, WARNING, ERROR) |
 | `PRELOAD_MODEL` | `true` | Download model weights on startup |
 | `MAX_CONCURRENT_JOBS` | `1` | Max simultaneous generations (1 for single GPU) |
-| `GCS_BUCKET` | `""` | Google Cloud Storage bucket name |
+| `STORAGE_BACKEND` | `r2` | Storage backend (`r2` or `gcs`) |
+| `STORAGE_KEY_PREFIX` | `clips` | Object key prefix/folder |
+| `R2_BUCKET` | `""` | Cloudflare R2 bucket name |
+| `R2_ACCOUNT_ID` | `null` | Cloudflare account ID (or set `R2_ENDPOINT_URL`) |
+| `R2_ENDPOINT_URL` | `null` | R2 endpoint URL override |
+| `R2_ACCESS_KEY_ID` | `null` | R2 access key ID |
+| `R2_SECRET_ACCESS_KEY` | `null` | R2 secret access key |
+| `R2_REGION` | `auto` | S3 region (use `auto` for R2) |
+| `R2_PUBLIC_BASE_URL` | `null` | Public base URL (supports `{bucket}`) |
+| `R2_PRESIGN_TTL_S` | `3600` | Signed URL TTL (seconds) |
+| `GCS_BUCKET` | `""` | Google Cloud Storage bucket name (when using `STORAGE_BACKEND=gcs`) |
 | `GCS_SERVICE_ACCOUNT_KEY` | `null` | Path to GCS credentials JSON |
 | `HF_TOKEN` | `null` | HuggingFace API token (optional) |
 | `TORCH_DTYPE` | `bfloat16` | Model precision (bfloat16, float16, float32) |
@@ -250,7 +262,7 @@ watch -n 1 'docker exec <container-id> nvidia-smi'
 ## Production Checklist
 
 - [ ] Model weights cached in persistent volume
-- [ ] GCS credentials configured
+- [ ] R2 credentials configured (or GCS if using `STORAGE_BACKEND=gcs`)
 - [ ] Health checks enabled
 - [ ] Logging level set appropriately (INFO or WARNING)
 - [ ] Auto-scaling configured (if needed)

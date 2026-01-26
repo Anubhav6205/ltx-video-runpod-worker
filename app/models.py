@@ -140,3 +140,24 @@ class ErrorResponse(BaseModel):
     error: str = Field(..., description="Error message")
     detail: Optional[str] = Field(default=None, description="Additional error details")
     job_id: Optional[str] = Field(default=None, description="Job ID if applicable")
+
+
+class TestR2Response(BaseModel):
+    """Response schema for R2 upload test"""
+    ok: bool = Field(default=True, description="Whether the test succeeded")
+    job_id: str = Field(..., description="Job ID used for the uploaded object name")
+    bucket: str = Field(..., description="R2 bucket used for the test upload")
+    key: str = Field(..., description="Object key written to R2")
+    url: str = Field(..., description="Public/signed URL returned for the uploaded object")
+
+
+class TestR2Request(BaseModel):
+    """Request schema for R2 upload test"""
+    mp4_path: Optional[str] = Field(
+        default=None,
+        description="Path to a local .mp4 file on the worker filesystem (defaults to a tiny generated test file)"
+    )
+    job_id: Optional[str] = Field(
+        default=None,
+        description="Optional job_id to use for the uploaded filename (defaults to a random UUID)"
+    )

@@ -43,6 +43,56 @@ def get_torch_dtype(dtype_str: str) -> torch.dtype:
     return dtype
 
 
+def get_cache_dir() -> str:
+    """
+    Find the correct HuggingFace cache directory with fallback support.
+    Checks multiple locations to handle Docker ENV mismatches gracefully.
+
+    Priority:
+    1. /workspace/models/hf_hub (preferred - volume mount)
+    2. ENV variable HF_HUB_CACHE
+    3. /models/hf_hub (fallback for old Docker images)
+
+    Returns:
+        Path to cache directory with existing weights, or default location
+    """
+    candidates = [
+        Path("/workspace/models/hf_hub"),  # Preferred (volume)
+        Path(os.getenv("HF_HUB_CACHE", "/workspace/models/hf_hub")),  # ENV override
+        Path("/models/hf_hub"),  # Fallback (old Docker ENV)
+    ]
+
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_candidates = []
+    for path in candidates:
+        path_str = str(path)
+        if path_str not in seen:
+            seen.add(path_str)
+            unique_candidates.append(path)
+
+    logger.info("Searching for cached model weights...")
+    for cache_dir in unique_candidates:
+        if cache_dir.exists():
+            # Check if LTX-Video model weights exist
+            model_files = list(cache_dir.glob("models--Lightricks--LTX-Video/**/*.safetensors"))
+            if model_files:
+                logger.info(f"✅ Found cached weights at: {cache_dir}")
+                logger.info(f"   Model files: {len(model_files)} safetensors found")
+                return str(cache_dir)
+            else:
+                logger.info(f"   {cache_dir} exists but no model weights found")
+        else:
+            logger.info(f"   {cache_dir} does not exist")
+
+    # No cached weights found - use preferred location
+    default = "/workspace/models/hf_hub"
+    logger.warning(f"⚠️  No cached weights found in any location!")
+    logger.warning(f"   Will attempt to use: {default}")
+    logger.warning(f"   Note: Downloads are DISABLED - ensure volume is mounted correctly")
+    return default
+
+
 def init_model() -> None:
     """
     Initialize the LTX-Video pipeline
@@ -68,66 +118,83 @@ def init_model() -> None:
         settings.setup_hf_env()
         settings.ensure_directories()
 
-        # DEBUG: Check if volume is mounted and populated
-        logger.info(f"Checking cache directory: {settings.hf_hub_cache}")
-        if settings.hf_hub_cache.exists():
-            try:
-                # List first level of cache
-                contents = list(settings.hf_hub_cache.glob("*"))
-                logger.info(f"Cache directory contents ({len(contents)} items):")
-                for item in contents[:5]:  # Show first 5 items
-                    logger.info(f" - {item.name}")
-            except Exception as e:
-                logger.warning(f"Could not list cache directory: {e}")
-        else:
-            logger.warning(f"Cache directory does not exist: {settings.hf_hub_cache}")
+        # Use smart cache directory detection with fallback
+        cache_dir = get_cache_dir()
+        logger.info(f"Using cache directory: {cache_dir}")
 
         # Import here after env vars are set
         # Using LTXImageToVideoPipeline for image-to-video generation
         # See: https://huggingface.co/docs/diffusers/main/api/pipelines/ltx_video
-        from diffusers import LTXImageToVideoPipeline
+        from diffusers import LTXImageToVideoPipeline, LTXVideoTransformer3DModel
 
-        # Download transformer weights explicitly to ensure caching
-        logger.info("Checking for transformer weights...")
+        # Check for transformer weights (local only - no downloads)
+        logger.info("Loading transformer weights from local cache...")
+        transformer_path = None
         try:
-            logger.info("Attempting to load transformer weights from local cache...")
             transformer_path = hf_hub_download(
                 repo_id=settings.ltx_repo_id,
                 filename=settings.ltx_transformer_filename,
-                cache_dir=str(settings.hf_hub_cache),
-                local_files_only=True,
+                cache_dir=cache_dir,
+                local_files_only=True,  # CRITICAL: Never download, fail fast
             )
-            logger.info(f"Found transformer weights in cache: {transformer_path}")
-        except Exception:
-            logger.info("Transformer weights not found locally, downloading...")
-            transformer_path = hf_hub_download(
-                repo_id=settings.ltx_repo_id,
-                filename=settings.ltx_transformer_filename,
-                token=settings.hf_token,
-                cache_dir=str(settings.hf_hub_cache),
+            logger.info(f"✅ Transformer weights found: {transformer_path}")
+        except Exception as e:
+            logger.error(f"❌ Failed to find transformer weights in cache!")
+            logger.error(f"   Cache directory: {cache_dir}")
+            logger.error(f"   Error: {str(e)}")
+            logger.error(f"   SOLUTION: Ensure volume is mounted to /workspace with pre-cached weights")
+            raise RuntimeError(
+                f"Model weights not found in cache. Downloads are disabled. "
+                f"Please ensure volume with model weights is mounted to /workspace. "
+                f"Searched: {cache_dir}"
             )
-            logger.info(f"Transformer weights cached at: {transformer_path}")
 
-        # Load pipeline from pretrained
+        # Load pipeline from pretrained (local only - no downloads)
         # Recommended dtype: torch.bfloat16 (supports float16, float32 for VAE/text encoder)
-        logger.info("Loading LTX-Video pipeline...")
+        logger.info("Loading LTX-Video pipeline from local cache...")
         torch_dtype = get_torch_dtype(settings.torch_dtype)
 
         try:
-            logger.info("Attempting to load pipeline from local cache...")
+            # Manually load transformer if we found a specific file
+            # This handles FP8 loading or custom checkpoint files
+            transformer = None
+            if transformer_path:
+                logger.info(f"Loading custom transformer from: {transformer_path}")
+                
+                # Determine dtype for transformer
+                # ALWAYS load in bfloat16 first to ensure structure compatibility
+                # We will quantize to FP8 in-place using torchao if needed
+                transformer = LTXVideoTransformer3DModel.from_single_file(
+                    transformer_path, 
+                    torch_dtype=torch_dtype
+                )
+
+                if settings.use_fp8:
+                    logger.info("Applying FP8 quantization via torchao...")
+                    try:
+                        from torchao.quantization import quantize_, float8_weight_only
+                        quantize_(transformer, float8_weight_only())
+                        logger.info("✅ Transformer quantized to FP8 (torchao)")
+                    except ImportError:
+                        logger.error("❌ torchao not installed! cannot use FP8. Falling back to BF16 (may OOM).")
+                    except Exception as e:
+                        logger.error(f"❌ FP8 quantization failed: {e}")
+
             PIPE = LTXImageToVideoPipeline.from_pretrained(
                 settings.ltx_repo_id,
+                transformer=transformer,
                 torch_dtype=torch_dtype,
-                cache_dir=str(settings.hf_hub_cache),
-                local_files_only=True,
+                cache_dir=cache_dir,
+                local_files_only=True,  # CRITICAL: Never download
             )
-            logger.info("Pipeline loaded from local cache")
+            logger.info("✅ Pipeline loaded successfully from local cache")
         except Exception as e:
-            logger.info(f"Could not load pipeline locally ({str(e)}), attempting download...")
-            PIPE = LTXImageToVideoPipeline.from_pretrained(
-                settings.ltx_repo_id,
-                torch_dtype=torch_dtype,
-                cache_dir=str(settings.hf_hub_cache),
+            logger.error(f"❌ Failed to load pipeline from cache!")
+            logger.error(f"   Cache directory: {cache_dir}")
+            logger.error(f"   Error: {str(e)}")
+            raise RuntimeError(
+                f"Pipeline loading failed. Ensure all model components are cached. "
+                f"Downloads are disabled for cost protection."
             )
 
         # Move to CUDA
