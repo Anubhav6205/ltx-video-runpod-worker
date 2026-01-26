@@ -67,7 +67,7 @@ curl -X POST http://localhost:8000/generate_clip \
 ### Prerequisites
 
 - Python 3.10+
-- NVIDIA GPU with CUDA 12.1+
+- NVIDIA GPU with CUDA 12.1+ (CUDA 12.8+ for RTX 5090)
 - 16GB+ VRAM (24GB recommended)
 - ffmpeg installed
 - Cloudflare R2 bucket and credentials (default) OR Google Cloud Storage bucket and credentials (optional)
@@ -204,7 +204,7 @@ docker push your-registry/ltx-worker:0.1
 
 2. **Create a New Pod**
    - Click "Deploy" → "GPU Pod"
-   - Select GPU: **RTX 4090** (24GB VRAM recommended)
+   - Select GPU: **RTX 4090** or **RTX 5090** (24GB+ VRAM recommended)
    - Select a region with availability
 
 3. **Configure the Pod**

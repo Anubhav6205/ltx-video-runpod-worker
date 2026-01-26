@@ -68,7 +68,11 @@ def generate_clip(request: GenerateClipRequest) -> Tuple[str, Path, GenerationMe
 
         with torch.inference_mode():
             # Use autocast for mixed precision if using float16
-            context = torch.cuda.amp.autocast(enabled=(settings.torch_dtype == "float16"))
+            # NOTE: FP8 models work without autocast - they handle dtype internally
+            use_autocast = settings.torch_dtype == "float16"
+            if use_autocast:
+                logger.debug("Using autocast for float16 inference")
+            context = torch.cuda.amp.autocast(enabled=use_autocast)
 
             with context:
                 # Using recommended parameters from LTX-Video 0.9.1+ documentation

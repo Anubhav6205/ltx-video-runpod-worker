@@ -14,10 +14,10 @@ google-cloud-storage==2.19.0
 boto3==1.35.92
 
 # ML/Diffusion models - Updated for latest LTX support (January 2026)
-# NOTE: torch and torchvision are installed in Dockerfile with CUDA 12.1 support for RunPod RTX 4090
+# NOTE: torch and torchvision are installed in Dockerfile with CUDA 12.8 support for RunPod RTX 5090
 # Uncomment below for local CPU-only development on your machine:
-# torch==2.10.0
-# torchvision==0.25.0
+# torch==2.7.0
+# torchvision==0.22.0
 accelerate==1.12.0  # Latest stable version
 safetensors==0.7.0  # Latest stable version
 transformers==4.46.3

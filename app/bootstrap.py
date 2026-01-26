@@ -4,6 +4,7 @@ Downloads model weights and loads the LTX-Video pipeline at startup
 Implements singleton pattern to ensure model is loaded only once
 """
 
+import gc
 import logging
 import os
 from pathlib import Path
@@ -158,34 +159,96 @@ def init_model() -> None:
             # Manually load transformer if we found a specific file
             # This handles FP8 loading or custom checkpoint files
             transformer = None
+            transformer_dtype = None
             if transformer_path:
                 logger.info(f"Loading custom transformer from: {transformer_path}")
-                
-                # Determine dtype for transformer
-                # ALWAYS load in bfloat16 first to ensure structure compatibility
-                # We will quantize to FP8 in-place using torchao if needed
-                transformer = LTXVideoTransformer3DModel.from_single_file(
-                    transformer_path, 
-                    torch_dtype=torch_dtype
-                )
 
-                if settings.use_fp8:
-                    logger.info("Applying FP8 quantization via torchao...")
-                    try:
-                        from torchao.quantization import quantize_, float8_weight_only
-                        quantize_(transformer, float8_weight_only())
-                        logger.info("✅ Transformer quantized to FP8 (torchao)")
-                    except ImportError:
-                        logger.error("❌ torchao not installed! cannot use FP8. Falling back to BF16 (may OOM).")
-                    except Exception as e:
-                        logger.error(f"❌ FP8 quantization failed: {e}")
+                # Check if this is a pre-quantized FP8 model
+                is_pre_quantized_fp8 = "fp8" in settings.ltx_transformer_filename.lower()
+
+                if is_pre_quantized_fp8:
+                    # Model is ALREADY in FP8 format - load without dtype conversion
+                    # CRITICAL: Don't specify torch_dtype to preserve native FP8 format
+                    logger.info("Detected pre-quantized FP8 model - loading in native FP8 format")
+                    logger.info("⚠️  Loading without dtype conversion to prevent BF16/FP8 mismatch")
+
+                    # Aggressively clear GPU memory before loading to prevent OOM
+                    if torch.cuda.is_available():
+                        # Multiple passes to ensure thorough cleanup
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
+                        # Log memory status
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        free = (torch.cuda.get_device_properties(0).total_memory / 1024**3) - allocated
+                        logger.info(f"Pre-load GPU memory: {allocated:.2f}GB allocated, {free:.2f}GB free")
+
+                    # Load without torch_dtype to preserve FP8 weights
+                    # Use low_cpu_mem_usage to minimize memory overhead (1x model size instead of 2x)
+                    # Load to CPU first - CPU offload will manage GPU placement
+                    transformer = LTXVideoTransformer3DModel.from_single_file(
+                        transformer_path,
+                        low_cpu_mem_usage=True
+                    )
+                    logger.info("✅ Transformer loaded to CPU (CPU offload will manage GPU placement)")
+
+                    transformer_dtype = None  # Signal that transformer is FP8, don't convert
+                    logger.info("✅ Pre-quantized FP8 transformer loaded in native format")
+                else:
+                    # Model is NOT pre-quantized - load in bfloat16 and optionally quantize
+                    logger.info("Loading non-quantized model in bfloat16")
+
+                    # Aggressively clear GPU memory before loading to prevent OOM
+                    if torch.cuda.is_available():
+                        # Multiple passes to ensure thorough cleanup
+                        gc.collect()
+                        torch.cuda.empty_cache()
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
+                        # Log memory status
+                        allocated = torch.cuda.memory_allocated() / 1024**3
+                        reserved = torch.cuda.memory_reserved() / 1024**3
+                        free = (torch.cuda.get_device_properties(0).total_memory / 1024**3) - allocated
+                        logger.info(f"Pre-load GPU memory: {allocated:.2f}GB allocated, {free:.2f}GB free")
+
+                    transformer = LTXVideoTransformer3DModel.from_single_file(
+                        transformer_path,
+                        torch_dtype=torch_dtype,
+                        low_cpu_mem_usage=True  # Minimize memory overhead during loading
+                    )
+                    transformer_dtype = torch_dtype
+
+                    # Only apply torchao quantization if requested AND model is not already FP8
+                    if settings.use_fp8:
+                        logger.info("Applying FP8 quantization via torchao...")
+                        try:
+                            from torchao.quantization import quantize_, float8_weight_only
+                            quantize_(transformer, float8_weight_only())
+                            transformer_dtype = None  # Now it's FP8
+                            logger.info("✅ Transformer quantized to FP8 (torchao)")
+                        except ImportError:
+                            logger.error("❌ torchao not installed! cannot use FP8. Falling back to BF16 (may OOM).")
+                        except Exception as e:
+                            logger.error(f"❌ FP8 quantization failed: {e}")
+
+            # Load pipeline with proper dtype handling for FP8 compatibility
+            # For FP8 transformers: VAE and text encoder use bfloat16, transformer stays FP8
+            logger.info("Loading pipeline components...")
+            if transformer_dtype is None:
+                logger.info("Using FP8 transformer with bfloat16 VAE/text encoder")
 
             PIPE = LTXImageToVideoPipeline.from_pretrained(
                 settings.ltx_repo_id,
                 transformer=transformer,
                 torch_dtype=torch_dtype,
                 cache_dir=cache_dir,
-                local_files_only=True,  # CRITICAL: Never download
+                local_files_only=True,
+                low_cpu_mem_usage=True,
+                use_safetensors=True,
             )
             logger.info("✅ Pipeline loaded successfully from local cache")
         except Exception as e:
@@ -197,16 +260,36 @@ def init_model() -> None:
                 f"Downloads are disabled for cost protection."
             )
 
-        # Move to CUDA
+        # Verify CUDA is available
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is not available - GPU is required!")
 
-        logger.info(f"Moving pipeline to CUDA (GPU: {torch.cuda.get_device_name(0)})")
-        PIPE = PIPE.to("cuda")
+        # Smart GPU memory management based on available VRAM
+        # 13B FP8 model needs ~26GB total (23GB transformer + 2GB VAE + 1GB text encoder)
+        gpu_name = torch.cuda.get_device_name(0)
+        total_vram_gb = torch.cuda.get_device_properties(0).total_memory / 1024**3
 
-        # Enable memory optimizations
-        logger.info("Enabling memory-efficient attention...")
-        PIPE.enable_model_cpu_offload()  # Offload modules not in use
+        logger.info(f"GPU: {gpu_name}, Total VRAM: {total_vram_gb:.1f}GB")
+
+        if total_vram_gb >= 30:
+            # Large GPU (30GB+): Try loading everything to GPU for maximum speed
+            logger.info("Large GPU detected (30GB+) - attempting full GPU load")
+            try:
+                PIPE = PIPE.to("cuda")
+                logger.info("✅ Pipeline fully loaded to GPU - no CPU offload needed")
+            except RuntimeError as e:
+                if "out of memory" in str(e).lower():
+                    logger.warning("Full GPU load failed, falling back to CPU offload")
+                    torch.cuda.empty_cache()
+                    PIPE.enable_model_cpu_offload()
+                    logger.info("✅ CPU offload enabled - only active model kept on GPU")
+                else:
+                    raise
+        else:
+            # Standard GPU (24GB): Use CPU offload
+            logger.info(f"Standard GPU ({total_vram_gb:.1f}GB) - enabling CPU offload")
+            PIPE.enable_model_cpu_offload()
+            logger.info("✅ CPU offload enabled - only active model kept on GPU")
 
         _model_loaded = True
         logger.info("Model initialization complete!")

@@ -161,6 +161,10 @@ class Settings(BaseSettings):
         os.environ["TRANSFORMERS_CACHE"] = str(self.transformers_cache)
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = self.hf_hub_enable_hf_transfer
 
+        # Fix CUDA memory fragmentation for large models (23GB+ on 24GB GPUs)
+        # This allows PyTorch to expand memory segments dynamically instead of pre-allocating
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
         if self.hf_token:
             os.environ["HF_TOKEN"] = self.hf_token
 

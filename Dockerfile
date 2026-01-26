@@ -1,18 +1,21 @@
 # LTX-Video Worker Dockerfile
-# Optimized for NVIDIA GPU (CUDA 12.1) on RunPod
-# Base image: NVIDIA CUDA runtime on Ubuntu 22.04
+# Optimized for NVIDIA GPU (CUDA 12.8) on RunPod - RTX 5090 Ready
+# Base image: NVIDIA CUDA runtime on Ubuntu 24.04
 
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
+# Allow pip to modify system packages (PEP 668 on Ubuntu 24.04)
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Set working directory
 WORKDIR /app
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
-    python3.10 \
+# Ubuntu 24.04 includes Python 3.12 by default
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
     python3-pip \
     python3-dev \
     git \
@@ -20,6 +23,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     ca-certificates \
     wget \
+    && apt-get purge -y python3-wheel python3-setuptools \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip and install build tools
@@ -28,13 +32,13 @@ RUN python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel
 # Copy requirements first for better caching
 COPY requirements.txt /app/requirements.txt
 
-# Install PyTorch with CUDA 12.1 support for RTX 4090
+# Install PyTorch with CUDA 12.8 support for RTX 5090
 # Installed separately to ensure correct CUDA version
-# Using 2.5.1 (latest available for CUDA 12.1)
+# Using 2.7.0 (supports Blackwell/sm_120)
 RUN python3 -m pip install --no-cache-dir \
-    torch==2.5.1 \
-    torchvision==0.20.1 \
-    --index-url https://download.pytorch.org/whl/cu121
+    torch==2.7.0 \
+    torchvision==0.22.0 \
+    --index-url https://download.pytorch.org/whl/cu128
 
 # Install remaining Python dependencies
 # This layer is cached unless requirements.txt changes
