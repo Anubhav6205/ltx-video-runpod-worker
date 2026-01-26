@@ -1,6 +1,6 @@
 # FastAPI stack
 fastapi==0.128.0
-uvicorn[standard]==0.40.0
+uvicorn==0.40.0
 pydantic==2.10.5
 pydantic-settings==2.7.1
 
@@ -13,29 +13,23 @@ python-multipart==0.0.20
 google-cloud-storage==2.19.0
 boto3==1.35.92
 
-# ML/Diffusion models - Updated for latest LTX support (January 2026)
-# NOTE: torch and torchvision are installed in Dockerfile with CUDA 12.8 support for RunPod RTX 5090
-# Uncomment below for local CPU-only development on your machine:
-# torch==2.7.0
-# torchvision==0.22.0
-accelerate==1.12.0  # Latest stable version
-safetensors==0.7.0  # Latest stable version
-transformers==4.46.3
+# ML/Diffusion stack
+accelerate==1.12.0
+safetensors==0.7.0
+transformers==4.51.3
 huggingface_hub==0.35.1
-numpy==2.2.3
-sentencepiece==0.2.1  # Latest version with pre-built wheels
-protobuf==5.29.4
-hf_transfer==0.1.9
 
-# Install diffusers - Using stable release with LTX support
+# (Stability-first) stick to numpy 1.x to avoid edge ABI issues with compiled wheels
+numpy==1.26.4
+
+sentencepiece==0.2.1
+protobuf==5.29.4
+
 diffusers==0.36.0
 
 # Video export
 imageio==2.37.0
 imageio-ffmpeg==0.5.1
 
-# Optimization / Quantization
-torchao==0.6.1
-
 # Monitoring
-psutil==7.2.1  # Latest stable version
+psutil==7.2.1
