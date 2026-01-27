@@ -7,6 +7,7 @@ Implements singleton pattern to ensure model is loaded only once
 import gc
 import logging
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 import torch
@@ -92,6 +93,75 @@ def get_cache_dir() -> str:
     logger.warning(f"   Will attempt to use: {default}")
     logger.warning(f"   Note: Downloads are DISABLED - ensure volume is mounted correctly")
     return default
+
+
+def _try_enable(pipe, method_name: str, *args, **kwargs) -> bool:
+    """
+    Best-effort enable of optional diffusers pipeline optimizations.
+    Returns True if successfully enabled, False otherwise.
+    """
+    if not hasattr(pipe, method_name):
+        logger.debug(f"Pipeline does not support {method_name}")
+        return False
+    try:
+        getattr(pipe, method_name)(*args, **kwargs)
+        logger.info(f"Enabled {method_name}")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to enable {method_name}: {e}")
+        return False
+
+
+def _apply_memory_optimizations(pipe, total_vram_gb: float) -> None:
+    """
+    Enable memory-saving features that should not change output quality.
+    These trade latency for lower peak VRAM.
+    """
+    # Prefer xFormers attention when available; fallback to attention slicing.
+    enabled_xformers = False
+    if hasattr(pipe, "enable_xformers_memory_efficient_attention"):
+        try:
+            pipe.enable_xformers_memory_efficient_attention()
+            enabled_xformers = True
+            logger.info("Enabled xformers memory efficient attention")
+        except Exception as e:
+            logger.warning(f"Failed to enable xformers attention: {e}")
+
+    if not enabled_xformers:
+        _try_enable(pipe, "enable_attention_slicing", "auto")
+
+    # VAE slicing reduces decoder peak memory.
+    _try_enable(pipe, "enable_vae_slicing")
+
+    # VAE tiling helps for larger resolutions or tight VRAM budgets.
+    if total_vram_gb <= 32:
+        _try_enable(pipe, "enable_vae_tiling")
+
+
+def _cast_non_transformer_modules(pipe, dtype: torch.dtype) -> None:
+    """
+    For FP8 transformers, avoid any whole-pipeline dtype conversion that might upcast the transformer.
+    Instead, cast known non-transformer modules to the requested dtype.
+    """
+    for name in ("vae", "text_encoder", "text_encoder_2", "image_encoder"):
+        mod = getattr(pipe, name, None)
+        if mod is None:
+            continue
+        if not isinstance(mod, torch.nn.Module):
+            continue
+        try:
+            mod.to(dtype=dtype)
+            logger.info(f"Casted {name} to {dtype}")
+        except Exception as e:
+            logger.warning(f"Failed to cast {name} to {dtype}: {e}")
+
+
+def ensure_non_transformer_modules_dtype(pipe, dtype: torch.dtype) -> None:
+    """
+    Best-effort: ensure non-transformer modules (VAE/text encoders) match requested dtype.
+    Useful as a runtime recovery step if a request hits a BF16/FP32 matmul mismatch.
+    """
+    _cast_non_transformer_modules(pipe, dtype)
 
 
 def init_model() -> None:
@@ -223,7 +293,8 @@ def init_model() -> None:
                     transformer_dtype = torch_dtype
 
                     # Only apply torchao quantization if requested AND model is not already FP8
-                    if settings.use_fp8:
+                    use_fp8_env = os.getenv("USE_FP8", "").strip().lower() in {"1", "true", "yes", "on"}
+                    if settings.enable_torchao_fp8_quantization or use_fp8_env:
                         logger.info("Applying FP8 quantization via torchao...")
                         try:
                             from torchao.quantization import quantize_, float8_weight_only
@@ -241,15 +312,29 @@ def init_model() -> None:
             if transformer_dtype is None:
                 logger.info("Using FP8 transformer with bfloat16 VAE/text encoder")
 
-            PIPE = LTXImageToVideoPipeline.from_pretrained(
-                settings.ltx_repo_id,
-                transformer=transformer,
-                torch_dtype=torch_dtype,
-                cache_dir=cache_dir,
-                local_files_only=True,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-            )
+            # IMPORTANT: When using an FP8 transformer (pre-quantized or torchao-quantized),
+            # avoid passing torch_dtype to from_pretrained because some code paths may apply
+            # dtype conversion broadly and inadvertently upcast the FP8 transformer.
+            if transformer is not None and transformer_dtype is None:
+                PIPE = LTXImageToVideoPipeline.from_pretrained(
+                    settings.ltx_repo_id,
+                    transformer=transformer,
+                    cache_dir=cache_dir,
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                )
+                _cast_non_transformer_modules(PIPE, torch_dtype)
+            else:
+                PIPE = LTXImageToVideoPipeline.from_pretrained(
+                    settings.ltx_repo_id,
+                    transformer=transformer,
+                    torch_dtype=torch_dtype,
+                    cache_dir=cache_dir,
+                    local_files_only=True,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                )
             logger.info("✅ Pipeline loaded successfully from local cache")
         except Exception as e:
             logger.error(f"❌ Failed to load pipeline from cache!")
@@ -271,25 +356,41 @@ def init_model() -> None:
 
         logger.info(f"GPU: {gpu_name}, Total VRAM: {total_vram_gb:.1f}GB")
 
-        if total_vram_gb >= 30:
-            # Large GPU (30GB+): Try loading everything to GPU for maximum speed
-            logger.info("Large GPU detected (30GB+) - attempting full GPU load")
+        # Apply safe memory optimizations before placing on GPU
+        _apply_memory_optimizations(PIPE, total_vram_gb)
+
+        if settings.enable_cpu_offload:
+            # Prefer offload when enabled to preserve VRAM headroom for activations
+            logger.info("CPU offload enabled by settings")
             try:
-                PIPE = PIPE.to("cuda")
-                logger.info("✅ Pipeline fully loaded to GPU - no CPU offload needed")
-            except RuntimeError as e:
-                if "out of memory" in str(e).lower():
-                    logger.warning("Full GPU load failed, falling back to CPU offload")
-                    torch.cuda.empty_cache()
-                    PIPE.enable_model_cpu_offload()
-                    logger.info("✅ CPU offload enabled - only active model kept on GPU")
+                if total_vram_gb <= 32 and hasattr(PIPE, "enable_sequential_cpu_offload"):
+                    PIPE.enable_sequential_cpu_offload()
+                    logger.info("CPU sequential offload enabled")
                 else:
-                    raise
+                    PIPE.enable_model_cpu_offload()
+                    logger.info("CPU offload enabled - only active model kept on GPU")
+            except Exception as e:
+                logger.warning(f"CPU offload failed: {e}")
         else:
-            # Standard GPU (24GB): Use CPU offload
-            logger.info(f"Standard GPU ({total_vram_gb:.1f}GB) - enabling CPU offload")
-            PIPE.enable_model_cpu_offload()
-            logger.info("✅ CPU offload enabled - only active model kept on GPU")
+            # Only attempt full GPU load when there's ample headroom
+            full_gpu_threshold_gb = 40.0
+            if total_vram_gb >= full_gpu_threshold_gb:
+                logger.info(f"Large GPU detected ({total_vram_gb:.1f}GB) - attempting full GPU load")
+                try:
+                    PIPE = PIPE.to("cuda")
+                    logger.info("Pipeline fully loaded to GPU - no CPU offload needed")
+                except RuntimeError as e:
+                    if "out of memory" in str(e).lower():
+                        logger.warning("Full GPU load failed, falling back to CPU offload")
+                        torch.cuda.empty_cache()
+                        PIPE.enable_model_cpu_offload()
+                        logger.info("CPU offload enabled - only active model kept on GPU")
+                    else:
+                        raise
+            else:
+                logger.info(f"GPU ({total_vram_gb:.1f}GB) below full-load threshold - enabling CPU offload")
+                PIPE.enable_model_cpu_offload()
+                logger.info("CPU offload enabled - only active model kept on GPU")
 
         _model_loaded = True
         logger.info("Model initialization complete!")
@@ -365,15 +466,19 @@ def warmup_model():
         # Run minimal generation
         pipeline = get_pipeline()
         with torch.inference_mode():
-            _ = pipeline(
-                prompt=settings.warmup_prompt,
-                image=test_image,
-                num_frames=25,  # 1 second at 24fps
-                num_inference_steps=4,  # Minimal steps
-                guidance_scale=1.0,
-                height=512,
-                width=704,
-            )
+            torch_dtype = get_torch_dtype(settings.torch_dtype)
+            use_autocast = torch_dtype in (torch.float16, torch.bfloat16)
+            autocast_ctx = torch.autocast("cuda", dtype=torch_dtype) if use_autocast else nullcontext()
+            with autocast_ctx:
+                _ = pipeline(
+                    prompt=settings.warmup_prompt,
+                    image=test_image,
+                    num_frames=25,  # 1 second at 24fps
+                    num_inference_steps=4,  # Minimal steps
+                    guidance_scale=1.0,
+                    height=512,
+                    width=704,
+                )
 
         logger.info("Warmup complete!")
 

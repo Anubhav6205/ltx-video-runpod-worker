@@ -5,6 +5,8 @@ Handles the full pipeline from image download to video export
 
 import uuid
 import logging
+import gc
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Tuple, Dict, Any
 import torch
@@ -12,7 +14,7 @@ from PIL import Image
 
 from app.settings import settings
 from app.models import GenerateClipRequest, GenerationMeta
-from app.bootstrap import get_pipeline
+from app.bootstrap import get_pipeline, get_torch_dtype, ensure_non_transformer_modules_dtype
 from app.utils import download_image, ensure_directory
 from app.logging_config import get_logger
 
@@ -67,30 +69,54 @@ def generate_clip(request: GenerateClipRequest) -> Tuple[str, Path, GenerationMe
         pipeline = get_pipeline()
 
         with torch.inference_mode():
-            # Use autocast for mixed precision if using float16
-            # NOTE: FP8 models work without autocast - they handle dtype internally
-            use_autocast = settings.torch_dtype == "float16"
+            # Use autocast for mixed precision when running in FP16/BF16. This prevents
+            # runtime dtype mismatches when some weights or intermediate tensors remain FP32.
+            torch_dtype = get_torch_dtype(settings.torch_dtype)
+            use_autocast = torch_dtype in (torch.float16, torch.bfloat16)
             if use_autocast:
-                logger.debug("Using autocast for float16 inference")
-            context = torch.cuda.amp.autocast(enabled=use_autocast)
+                logger.debug(f"Using autocast for {torch_dtype} inference")
+            autocast_ctx = torch.autocast("cuda", dtype=torch_dtype) if use_autocast else nullcontext()
 
-            with context:
+            with autocast_ctx:
                 # Using recommended parameters from LTX-Video 0.9.1+ documentation
                 # See: https://huggingface.co/docs/diffusers/main/api/pipelines/ltx_video
-                result = pipeline(
-                    prompt=request.video_prompt,
-                    negative_prompt=request.negative_prompt,
-                    image=input_image,
-                    num_frames=num_frames,
-                    num_inference_steps=request.steps,
-                    guidance_scale=request.guidance_scale,
-                    height=request.height,
-                    width=request.width,
-                    frame_rate=request.fps,  # Added for temporal coordinates normalization
-                    decode_timestep=0.05,     # Recommended for timestep-aware VAE variants (0.9.1+)
-                    decode_noise_scale=0.025, # Recommended noise interpolation at decode time
-                    generator=generator,
-                )
+                try:
+                    result = pipeline(
+                        prompt=request.video_prompt,
+                        negative_prompt=request.negative_prompt,
+                        image=input_image,
+                        num_frames=num_frames,
+                        num_inference_steps=request.steps,
+                        guidance_scale=request.guidance_scale,
+                        height=request.height,
+                        width=request.width,
+                        frame_rate=request.fps,  # Added for temporal coordinates normalization
+                        decode_timestep=0.05,     # Recommended for timestep-aware VAE variants (0.9.1+)
+                        decode_noise_scale=0.025, # Recommended noise interpolation at decode time
+                        generator=generator,
+                    )
+                except Exception as e:
+                    # Known failure mode: BF16 activations vs FP32 weights in a matmul/linear.
+                    msg = str(e)
+                    if "expected mat1 and mat2 to have the same dtype" in msg:
+                        logger.warning("Detected dtype mismatch during inference; re-casting non-transformer modules and retrying once.")
+                        ensure_non_transformer_modules_dtype(pipeline, torch_dtype)
+                        result = pipeline(
+                            prompt=request.video_prompt,
+                            negative_prompt=request.negative_prompt,
+                            image=input_image,
+                            num_frames=num_frames,
+                            num_inference_steps=request.steps,
+                            guidance_scale=request.guidance_scale,
+                            height=request.height,
+                            width=request.width,
+                            frame_rate=request.fps,
+                            decode_timestep=0.05,
+                            decode_noise_scale=0.025,
+                            generator=generator,
+                        )
+                    else:
+                        raise
 
         logger.info("Inference complete")
 
@@ -108,6 +134,13 @@ def generate_clip(request: GenerateClipRequest) -> Tuple[str, Path, GenerationMe
             str(output_path),
             fps=request.fps
         )
+
+        # Free transient buffers ASAP to reduce peak memory
+        del result
+        del video_frames
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         file_size = output_path.stat().st_size
         logger.info(f"Video exported successfully: {file_size / 1024 / 1024:.2f} MB")
