@@ -7,7 +7,7 @@ pydantic-settings==2.7.1
 # HTTP and utilities
 requests==2.32.3
 pillow==11.1.0
-python-multipart==0.0.20
+python-multipart==0.0.34
 
 # Storage
 google-cloud-storage==2.19.0
