@@ -1,6 +1,6 @@
 # LTX-Video RunPod Worker
 
-A production-ready FastAPI service for generating videos from images using **LTX-Video 2B distilled model**. Designed for deployment on RunPod GPU pods (RTX 4090) with Cloudflare R2 (default) or Google Cloud Storage (GCS) uploads.
+A FastAPI service for generating videos from images using **LTX-Video 2B distilled model**. Designed for deployment on RunPod GPU pods (RTX 4090) with Cloudflare R2 (default) or Google Cloud Storage (GCS) uploads.
 
 ## Features
 
@@ -490,6 +490,21 @@ For issues and questions:
 - **LTX-Video Model**: Lightricks
 - **Diffusers Library**: HuggingFace
 - **Compute Platform**: RunPod
-- **Storage**: Google Cloud Storage
-#   M e d i a - W o r k e r  
- 
+- **Storage**: Cloudflare R2 (default), Google Cloud Storage (optional)
+
+## Branches
+
+`main` is the base worker. `RTX-4090`, `RTX-5090` and `AAE-6000` hold GPU-specific variants that have not been merged into `main`.
+
+## Limitations
+
+- Needs an NVIDIA GPU with enough VRAM for the selected LTX-Video model.
+- No automated tests beyond the R2 wiring check in `test_r2_wiring.py`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
+
+## Contact
+
+Anubhav Gupta, [LinkedIn](https://www.linkedin.com/in/anubhav-gupta-92410a244/)
