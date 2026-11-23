@@ -24,7 +24,7 @@ transformers==4.46.3
 huggingface_hub==0.35.1
 numpy==2.2.3
 sentencepiece==0.2.1  # Latest version with pre-built wheels
-protobuf==5.29.4
+protobuf==7.36.2
 hf_transfer==0.1.9
 
 # Install diffusers - Using stable release with LTX support
