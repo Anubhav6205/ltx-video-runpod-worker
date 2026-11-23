@@ -2,7 +2,7 @@
 # Downloads model weights DURING BUILD for instant pod startup
 # Warning: Creates ~37GB image (12GB base + 25GB weights)
 
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:13.5.0-runtime-ubuntu22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive

@@ -2,7 +2,7 @@
 # Optimized for NVIDIA GPU (CUDA 12.1) on RunPod
 # Base image: NVIDIA CUDA runtime on Ubuntu 22.04
 
-FROM nvidia/cuda:12.1.1-runtime-ubuntu22.04
+FROM nvidia/cuda:13.5.0-runtime-ubuntu22.04
 
 # Prevent interactive prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
