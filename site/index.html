@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LTX-Video RunPod Worker - project page</title>
+<meta name="description" content="API reference and deployment notes for a FastAPI GPU service that generates video from images with LTX-Video. This page is documentation only.">
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#272c36; --text:#e6e8ec; --muted:#9aa3b2; --accent:#7cc4ff; --warn:#f2c46d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 2rem; margin: 0 0 6px; }
+  h2 { font-size: 1.3rem; margin: 44px 0 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+  .sub { color: var(--muted); margin: 0 0 18px; }
+  a { color: var(--accent); }
+  .notice { background: #2a2314; border: 1px solid #5a4a1e; color: var(--warn); border-radius: 8px; padding: 12px 14px; margin: 18px 0; }
+  .notice strong { color: #ffd98a; }
+  .links a { display:inline-block; margin: 0 10px 8px 0; padding: 6px 12px; border:1px solid var(--line); border-radius: 6px; text-decoration:none; background: var(--panel); }
+  pre { background: var(--panel); border:1px solid var(--line); border-radius: 8px; padding: 14px; overflow-x:auto; font-size: 13.5px; line-height:1.5; }
+  code { font-family: ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size: 0.92em; }
+  :not(pre) > code { background: var(--panel); border:1px solid var(--line); border-radius:4px; padding: 1px 5px; }
+  table { width:100%; border-collapse: collapse; margin: 10px 0; font-size: 0.95rem; }
+  th, td { text-align:left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .muted { color: var(--muted); }
+  footer { margin-top: 56px; color: var(--muted); font-size: 0.9rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>LTX-Video RunPod Worker</h1>
+  <p class="sub">A FastAPI service that turns an image and a text prompt into a short MP4 with the LTX-Video 2B distilled model. Built to run in a container on a RunPod GPU pod.</p>
+
+  <div class="notice">
+    <strong>This is a documentation page, not a running generator.</strong>
+    The worker needs an NVIDIA GPU with 16 GB or more of VRAM, which Vercel does not provide. Nothing on this page calls the model. The examples below come from the request and response models in the source code.
+  </div>
+
+  <p class="links">
+    <a href="https://github.com/Anubhav6205/ltx-video-runpod-worker">Source on GitHub</a>
+    <a href="https://github.com/Anubhav6205/ltx-video-runpod-worker#readme">Full README</a>
+    <a href="https://huggingface.co/Lightricks/LTX-Video">LTX-Video model card</a>
+  </p>
+
+  <h2>What it does</h2>
+  <ul>
+    <li>Accepts a public image URL and a prompt, runs the LTX-Video image-to-video pipeline through Diffusers, and writes an MP4.</li>
+    <li>Uploads the MP4 to Cloudflare R2 (default) or Google Cloud Storage and returns a public or presigned URL.</li>
+    <li>Limits concurrency with a semaphore (default 1 job) so a single GPU does not run out of memory. Extra requests get HTTP 429.</li>
+    <li>Exposes <code>/health</code> and <code>/ready</code> for monitoring, plus OpenAPI docs at <code>/docs</code> on a running instance.</li>
+    <li>Logs structured lines with a request and job ID.</li>
+  </ul>
+
+  <h2>Endpoints</h2>
+  <table>
+    <tr><th>Method and path</th><th>Purpose</th></tr>
+    <tr><td><code>GET /</code></td><td>Service name, version, model repo, readiness and endpoint list.</td></tr>
+    <tr><td><code>GET /health</code></td><td>Returns <code>{"ok": true}</code> whenever the server is up.</td></tr>
+    <tr><td><code>GET /ready</code></td><td>Returns <code>ready</code> and <code>model_loaded</code>. True only after the pipeline has loaded.</td></tr>
+    <tr><td><code>POST /generate_clip</code></td><td>Generate a clip from an image URL and prompt.</td></tr>
+    <tr><td><code>POST /test_r2</code></td><td>Upload a small MP4 to check R2 credentials and URL generation.</td></tr>
+  </table>
+
+  <h2>POST /generate_clip</h2>
+  <p class="muted">Example request (against your own deployed worker):</p>
+<pre><code>curl -X POST https://&lt;pod-id&gt;-8000.proxy.runpod.net/generate_clip \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_url": "https://example.com/input-frame.png",
+    "video_prompt": "Cinematic slow dolly-in, hair blowing in wind, natural light",
+    "duration_s": 5.0,
+    "width": 704,
+    "height": 512,
+    "fps": 24,
+    "steps": 8,
+    "seed": 1234
+  }'</code></pre>
+  <p class="muted">Example response shape (illustrative values):</p>
+<pre><code>{
+  "job_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "clip_url": "https://&lt;your-public-base&gt;/clips/f47ac10b-....mp4",
+  "meta": {
+    "fps": 24, "num_frames": 121, "width": 704, "height": 512,
+    "steps": 8, "model": "ltxv-2b-distilled", "seed": 1234,
+    "guidance_scale": 1.0, "duration_s": 5.0
+  }
+}</code></pre>
+
+  <h2>Request fields and limits</h2>
+  <table>
+    <tr><th>Field</th><th>Default</th><th>Constraint</th></tr>
+    <tr><td><code>image_url</code></td><td>required</td><td>Publicly reachable URL</td></tr>
+    <tr><td><code>video_prompt</code></td><td>required</td><td>1 to 500 characters</td></tr>
+    <tr><td><code>duration_s</code></td><td>5.0</td><td>1.0 to 10.0 seconds</td></tr>
+    <tr><td><code>width</code>, <code>height</code></td><td>704, 512</td><td>64 to 1280, divisible by 32</td></tr>
+    <tr><td><code>fps</code></td><td>24</td><td>12 to 30</td></tr>
+    <tr><td><code>steps</code></td><td>8</td><td>1 to 30 (distilled model is tuned for 4 to 8)</td></tr>
+    <tr><td><code>guidance_scale</code></td><td>1.0</td><td>0 to 20</td></tr>
+    <tr><td><code>negative_prompt</code></td><td>built-in default</td><td>Up to 500 characters</td></tr>
+    <tr><td><code>seed</code></td><td>random</td><td>0 to 4294967295</td></tr>
+    <tr><td><code>model</code></td><td><code>ltxv-2b-distilled</code></td><td>Only this value is accepted</td></tr>
+  </table>
+
+  <h2>Error responses</h2>
+  <table>
+    <tr><th>Status</th><th>Meaning</th></tr>
+    <tr><td>400</td><td>Bad input, such as an image that cannot be downloaded.</td></tr>
+    <tr><td>422</td><td>Request failed validation (for example, width not divisible by 32).</td></tr>
+    <tr><td>429</td><td>All generation slots are busy (<code>MAX_CONCURRENT_JOBS</code>).</td></tr>
+    <tr><td>503</td><td>Model still loading. Poll <code>/ready</code>.</td></tr>
+    <tr><td>500</td><td>Generation or upload failed.</td></tr>
+  </table>
+
+  <h2>Request flow</h2>
+<pre><code>Client
+  |  POST /generate_clip
+  v
+FastAPI (Pydantic validation, concurrency semaphore)
+  |
+  v
+Download input image
+  |
+  v
+LTX-Video image-to-video pipeline (Diffusers, GPU)
+  |  frames -> MP4
+  v
+Upload to Cloudflare R2 (default) or GCS
+  |
+  v
+JSON response with clip_url and meta</code></pre>
+
+  <h2>Deploying on RunPod</h2>
+  <ol>
+    <li>Build the image from the repo <code>Dockerfile</code> and push it to a registry. <code>Dockerfile.with-weights</code> bakes the model weights in for faster starts.</li>
+    <li>Create a GPU pod (an RTX 4090 with 24 GB is the target). Use at least 50 GB of container disk and mount a persistent volume at <code>/models</code> to cache weights.</li>
+    <li>Expose HTTP port 8000 and set the environment variables: <code>STORAGE_BACKEND</code>, <code>R2_BUCKET</code>, <code>R2_ACCOUNT_ID</code>, <code>R2_ACCESS_KEY_ID</code>, <code>R2_SECRET_ACCESS_KEY</code>, and optionally <code>HF_TOKEN</code> and <code>WARMUP_ON_START=true</code>.</li>
+    <li>Wait for the pod to start, then check <code>/ready</code> before sending requests.</li>
+  </ol>
+  <p class="muted">See <a href="https://github.com/Anubhav6205/ltx-video-runpod-worker/blob/main/DOCKER_DEPLOYMENT.md">DOCKER_DEPLOYMENT.md</a> and <a href="https://github.com/Anubhav6205/ltx-video-runpod-worker/blob/main/FAST_STARTUP_GUIDE.md">FAST_STARTUP_GUIDE.md</a> for more.</p>
+
+  <h2>Limitations</h2>
+  <ul>
+    <li>Needs an NVIDIA GPU with enough VRAM for the selected model. It cannot run on Vercel, so there is no live generation demo.</li>
+    <li>No automated tests beyond the R2 wiring check in <code>test_r2_wiring.py</code>.</li>
+    <li>The <code>RTX-4090</code>, <code>RTX-5090</code> and <code>AAE-6000</code> branches hold GPU-specific variants that are not merged into <code>main</code>.</li>
+  </ul>
+
+  <footer>
+    Anubhav Gupta, <a href="https://www.linkedin.com/in/anubhavgupta8">LinkedIn</a>. MIT licensed. Model weights are covered by the LTX-Video license.
+  </footer>
+</main>
+</body>
+</html>

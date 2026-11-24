@@ -1,5 +1,7 @@
 # LTX-Video RunPod Worker
 
+**Project page:** https://ltx-video-runpod-worker.vercel.app (API docs and deploy notes only. The generator itself needs an NVIDIA GPU and cannot run on Vercel.)
+
 A FastAPI service for generating videos from images using **LTX-Video 2B distilled model**. Designed for deployment on RunPod GPU pods (RTX 4090) with Cloudflare R2 (default) or Google Cloud Storage (GCS) uploads.
 
 ## Features
@@ -507,4 +509,4 @@ MIT, see [LICENSE](LICENSE).
 
 ## Contact
 
-Anubhav Gupta, [LinkedIn](https://www.linkedin.com/in/anubhav-gupta-92410a244/)
+Anubhav Gupta, [LinkedIn](https://www.linkedin.com/in/anubhavgupta8)
